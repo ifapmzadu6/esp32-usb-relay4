@@ -38,7 +38,7 @@ def configure_serial(fd: int, baud: int) -> None:
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
-def read_response(fd: int, timeout: float = 0.25) -> str:
+def read_response(fd: int, timeout: float = 0.25, expected_lines: int = 1) -> str:
     out = bytearray()
     end = time.time() + timeout
     while time.time() < end:
@@ -49,9 +49,8 @@ def read_response(fd: int, timeout: float = 0.25) -> str:
                 chunk = os.read(fd, 1024)
                 if chunk:
                     out.extend(chunk)
-                    if b"\n" in out:
-                        # Give a tiny window for multi-line responses (e.g. DIAG)
-                        end = min(end, time.time() + 0.05)
+                    if out.count(b"\n") >= expected_lines:
+                        break
             except BlockingIOError:
                 pass
     return out.decode(errors="replace").strip()
@@ -83,8 +82,8 @@ def main() -> int:
         "-t",
         "--timeout",
         type=float,
-        default=0.25,
-        help="Response timeout in seconds per command (default: 0.25)",
+        default=0.35,
+        help="Response timeout in seconds per command (default: 0.35)",
     )
     args = parser.parse_args()
 
@@ -93,6 +92,7 @@ def main() -> int:
         print("ERR: No USB serial port found (/dev/cu.usbmodem* or /dev/ttyACM*).", file=sys.stderr)
         return 1
 
+    had_error = False
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
         configure_serial(fd, args.baud)
@@ -102,15 +102,19 @@ def main() -> int:
             print(f"[init] {init_msg}")
 
         for idx, cmd in enumerate(args.commands):
-            os.write(fd, (cmd.strip() + "\n").encode())
-            resp = read_response(fd, timeout=args.timeout)
-            print(f"> {cmd}\n< {resp}")
+            clean_cmd = cmd.strip()
+            expected_lines = 2 if clean_cmd.upper() == "DIAG" else 1
+            os.write(fd, (clean_cmd + "\n").encode())
+            resp = read_response(fd, timeout=args.timeout, expected_lines=expected_lines)
+            print(f"> {clean_cmd}\n< {resp}")
+            if not resp or resp.startswith("ERR "):
+                had_error = True
             if args.wait > 0 and idx + 1 < len(args.commands):
                 time.sleep(args.wait)
     finally:
         os.close(fd)
 
-    return 0
+    return 2 if had_error else 0
 
 
 if __name__ == "__main__":

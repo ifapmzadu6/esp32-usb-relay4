@@ -104,17 +104,30 @@ sequenceDiagram
 | `ALL ON` | 全チャンネルを一括 ON | `OK ALL ON` |
 | `ALL OFF` | 全チャンネルを一括 OFF | `OK ALL OFF` |
 | `STATUS` | 各チャンネルの現在状態を取得 | `STATUS 1:<ON\|OFF> 2:<ON\|OFF> 3:<ON\|OFF> 4:<ON\|OFF>` |
-| `HELP` / `?` | 対応コマンド一覧を表示 | `COMMANDS: ON <1-4> \| OFF <1-4> \| ALL ON \| ALL OFF \| STATUS \| DIAG \| HELP` |
+| `HELP` / `?` | 対応コマンド一覧を表示 | `COMMANDS: ON <1-4> \| OFF <1-4> \| ALL ON \| ALL OFF \| STATUS \| DIAG \| TEST <pin> \| HELP` |
 
 ### 診断・テストコマンド
 
 | コマンド | 説明 | 応答形式 |
 | :--- | :--- | :--- |
 | `DIAG` | 現在のリレーピン状態（`LIVE`）を出力したうえで、利用可能 GPIO（`0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21`）を一時的に `INPUT_PULLDOWN` にしてモジュール側からのプルアップ有無を確認し、リレー出力を復帰します（`GPIO8`/`9` はオンボードプルアップにより通常 `1` になります）。 | `LIVE 2=<0\|1> 3=<0\|1> 4=<0\|1> 10=<0\|1>`<br>`DIAG 0=<0\|1> 1=<0\|1> ...` |
-| `TEST <pin>` | 指定した GPIO ピンを Push-Pull（`PP_LOW`/`PP_HIGH`）および Open-Drain（`OD_LOW`/`OD_HIGH`）で駆動してリードバックし、その後リレー出力を復帰します。 | `TEST <pin> PP_LOW=<0\|1> PP_HIGH=<0\|1> OD_LOW=<0\|1> OD_HIGH=<0\|1>` |
+| `TEST <pin>` | 指定した安全な GPIO ピン（`0..10, 20, 21`）を Push-Pull（`PP_LOW`/`PP_HIGH`）および Open-Drain（`OD_LOW`/`OD_HIGH`）で駆動してリードバックし、その後リレー出力を復帰します。 | `TEST <pin> PP_LOW=<0\|1> PP_HIGH=<0\|1> OD_LOW=<0\|1> OD_HIGH=<0\|1>` |
 
 ### エラー応答
 
 - `ERR INVALID CHANNEL (expected 1-4)`: `ON` / `OFF` のチャンネル指定が `1`〜`4` 以外の場合
+- `ERR INVALID PIN`: `TEST <pin>` に不正または対象外の GPIO ピンを指定した場合
 - `ERR UNKNOWN COMMAND`: 未定義のコマンドを受信した場合
 - `ERR COMMAND TOO LONG`: 1 行が 63 文字を超えた場合（次の改行まで読み捨てられます）
+
+## CLI ヘルパー / AI スキル
+
+依存パッケージなし（Python 3 標準ライブラリのみ）でシリアル制御できる CLI スクリプトと、AI エージェント向けのスキルを同梱しています。
+
+- **スキル定義**: [.agents/skills/relay-control/SKILL.md](.agents/skills/relay-control/SKILL.md)
+- **CLI スクリプト**: [.agents/skills/relay-control/scripts/relay_cli.py](.agents/skills/relay-control/scripts/relay_cli.py)
+
+```bash
+python3 .agents/skills/relay-control/scripts/relay_cli.py STATUS
+python3 .agents/skills/relay-control/scripts/relay_cli.py "ON 1" "ON 2" STATUS
+```

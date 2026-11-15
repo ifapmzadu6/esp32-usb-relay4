@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -8,6 +9,9 @@ constexpr size_t kRelayCount = 4;
 
 // Relay channels 1..4 mapped to GPIO2, GPIO3, GPIO4, GPIO10.
 constexpr uint8_t kRelayPins[kRelayCount] = {2, 3, 4, 10};
+
+// Safe user-accessible GPIOs on ESP32-C3 (excludes USB D+/D- and flash pins).
+constexpr uint8_t kUsablePins[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21};
 
 // The 5V opto-isolated module does not trigger reliably from a 3.3V HIGH
 // (H jumper): the input LED and optocoupler LED are in series and need more
@@ -22,6 +26,7 @@ constexpr size_t kCmdBufSize = 64;
 bool relayStates[kRelayCount] = {false, false, false, false};
 char cmdBuf[kCmdBufSize];
 size_t cmdLen = 0;
+bool discardingOverflow = false;
 
 uint8_t logicLevel(bool on) {
   const bool high = kRelayActiveLow ? !on : on;
@@ -51,7 +56,14 @@ void printStatus() {
 }
 
 void printHelp() {
-  Serial.println("COMMANDS: ON <1-4> | OFF <1-4> | ALL ON | ALL OFF | STATUS | DIAG | HELP");
+  Serial.println("COMMANDS: ON <1-4> | OFF <1-4> | ALL ON | ALL OFF | STATUS | DIAG | TEST <pin> | HELP");
+}
+
+void restoreRelayOutputs() {
+  for (size_t i = 0; i < kRelayCount; ++i) {
+    digitalWrite(kRelayPins[i], logicLevel(relayStates[i]));
+    pinMode(kRelayPins[i], kRelayPinMode);
+  }
 }
 
 // Wiring check: releases each usable GPIO, applies the weak internal pulldown
@@ -59,7 +71,6 @@ void printHelp() {
 // through the module and reads 1; an unconnected pin reads 0.
 // GPIO8/9 usually read 1 because of on-board pullups.
 void printDiag() {
-  static const uint8_t pins[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21};
   // Actual pin levels while the relay outputs are still being driven.
   Serial.print("LIVE");
   for (size_t i = 0; i < kRelayCount; ++i) {
@@ -70,7 +81,7 @@ void printDiag() {
   }
   Serial.println();
   Serial.print("DIAG");
-  for (const uint8_t pin : pins) {
+  for (const uint8_t pin : kUsablePins) {
     pinMode(pin, INPUT_PULLDOWN);
     delay(5);
     const int level = digitalRead(pin);
@@ -81,10 +92,7 @@ void printDiag() {
     Serial.print(level);
   }
   Serial.println();
-  for (size_t i = 0; i < kRelayCount; ++i) {
-    digitalWrite(kRelayPins[i], logicLevel(relayStates[i]));
-    pinMode(kRelayPins[i], kRelayPinMode);
-  }
+  restoreRelayOutputs();
 }
 
 // Output check: drives a pin push-pull and open-drain, reading back each level.
@@ -110,10 +118,7 @@ void printPinTest(uint8_t pin) {
   Serial.print(" OD_HIGH=");
   Serial.println(digitalRead(pin));
   pinMode(pin, INPUT);
-  for (size_t i = 0; i < kRelayCount; ++i) {
-    digitalWrite(kRelayPins[i], logicLevel(relayStates[i]));
-    pinMode(kRelayPins[i], kRelayPinMode);
-  }
+  restoreRelayOutputs();
 }
 
 void normalizeCommand(char *buf) {
@@ -152,6 +157,41 @@ bool parseChannel(const char *arg, size_t *outIndex) {
   return true;
 }
 
+bool parseUsablePin(const char *arg, uint8_t *outPin) {
+  if (arg == nullptr) {
+    return false;
+  }
+  while (*arg != '\0' && std::isspace(static_cast<unsigned char>(*arg))) {
+    ++arg;
+  }
+  if (!std::isdigit(static_cast<unsigned char>(*arg))) {
+    return false;
+  }
+  char *end = nullptr;
+  const long val = std::strtol(arg, &end, 10);
+  if (end == arg || *end != '\0' || val < 0 || val > 255) {
+    return false;
+  }
+  for (const uint8_t pin : kUsablePins) {
+    if (pin == static_cast<uint8_t>(val)) {
+      *outPin = pin;
+      return true;
+    }
+  }
+  return false;
+}
+
+void handleChannelCommand(const char *arg, bool on) {
+  size_t idx = 0;
+  if (!parseChannel(arg, &idx)) {
+    Serial.println("ERR INVALID CHANNEL (expected 1-4)");
+    return;
+  }
+  setRelay(idx, on);
+  Serial.print(on ? "OK ON " : "OK OFF ");
+  Serial.println(idx + 1);
+}
+
 void handleCommand(char *line) {
   normalizeCommand(line);
   if (line[0] == '\0') {
@@ -173,7 +213,12 @@ void handleCommand(char *line) {
     return;
   }
   if (std::strncmp(line, "TEST ", 5) == 0) {
-    printPinTest(static_cast<uint8_t>(atoi(line + 5)));
+    uint8_t pin = 0;
+    if (!parseUsablePin(line + 5, &pin)) {
+      Serial.println("ERR INVALID PIN");
+      return;
+    }
+    printPinTest(pin);
     return;
   }
   if (std::strcmp(line, "DIAG") == 0) {
@@ -184,28 +229,12 @@ void handleCommand(char *line) {
     printHelp();
     return;
   }
-
   if (std::strncmp(line, "ON ", 3) == 0) {
-    size_t idx = 0;
-    if (!parseChannel(line + 3, &idx)) {
-      Serial.println("ERR INVALID CHANNEL (expected 1-4)");
-      return;
-    }
-    setRelay(idx, true);
-    Serial.print("OK ON ");
-    Serial.println(idx + 1);
+    handleChannelCommand(line + 3, true);
     return;
   }
-
   if (std::strncmp(line, "OFF ", 4) == 0) {
-    size_t idx = 0;
-    if (!parseChannel(line + 4, &idx)) {
-      Serial.println("ERR INVALID CHANNEL (expected 1-4)");
-      return;
-    }
-    setRelay(idx, false);
-    Serial.print("OK OFF ");
-    Serial.println(idx + 1);
+    handleChannelCommand(line + 4, false);
     return;
   }
 
@@ -239,19 +268,25 @@ void loop() {
       continue;
     }
     if (c == '\n') {
-      cmdBuf[cmdLen] = '\0';
-      handleCommand(cmdBuf);
+      if (discardingOverflow) {
+        discardingOverflow = false;
+      } else {
+        cmdBuf[cmdLen] = '\0';
+        handleCommand(cmdBuf);
+      }
       cmdLen = 0;
+      continue;
+    }
+    if (discardingOverflow) {
       continue;
     }
     if (cmdLen + 1 < kCmdBufSize) {
       cmdBuf[cmdLen++] = c;
     } else {
-      // Discard overflowed line until next newline
+      // Discard the rest of the overflowed line until the next newline.
       cmdLen = 0;
+      discardingOverflow = true;
       Serial.println("ERR COMMAND TOO LONG");
-      while (Serial.available() > 0 && Serial.read() != '\n') {
-      }
     }
   }
 }
