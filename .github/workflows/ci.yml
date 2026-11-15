@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ESP32-C3 firmware
+        run: pio run
+
+      - name: Verify CLI helper
+        run: |
+          python3 -m py_compile .agents/skills/relay-control/scripts/relay_cli.py
+          python3 .agents/skills/relay-control/scripts/relay_cli.py --help > /dev/null

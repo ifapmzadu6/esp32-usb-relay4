@@ -143,13 +143,18 @@ void normalizeCommand(char *buf) {
   }
 }
 
+const char *skipWhitespace(const char *s) {
+  while (*s != '\0' && std::isspace(static_cast<unsigned char>(*s))) {
+    ++s;
+  }
+  return s;
+}
+
 bool parseChannel(const char *arg, size_t *outIndex) {
   if (arg == nullptr) {
     return false;
   }
-  while (*arg != '\0' && std::isspace(static_cast<unsigned char>(*arg))) {
-    ++arg;
-  }
+  arg = skipWhitespace(arg);
   if (arg[0] < '1' || arg[0] > static_cast<char>('0' + kRelayCount) || arg[1] != '\0') {
     return false;
   }
@@ -161,9 +166,7 @@ bool parseUsablePin(const char *arg, uint8_t *outPin) {
   if (arg == nullptr) {
     return false;
   }
-  while (*arg != '\0' && std::isspace(static_cast<unsigned char>(*arg))) {
-    ++arg;
-  }
+  arg = skipWhitespace(arg);
   if (!std::isdigit(static_cast<unsigned char>(*arg))) {
     return false;
   }
