@@ -20,6 +20,7 @@ CANCEL_FRAME = "\x18"
 EXPECTED_DEVICE_INFO = "INFO esp32-usb-relay4 PROTOCOL 1"
 COMMAND_MAX_LENGTH = 63
 MAX_RESPONSE_LINE_BYTES = 256
+INFO_PROBE_WINDOW = 0.25
 # GPIO assignments in protocol 1.
 RELAY_PINS = (2, 3, 4, 10)
 TEST_PINS = {0, 1, 5, 6, 7, 8, 9, 20, 21}
@@ -173,25 +174,39 @@ def read_response(
             return "\n".join(lines)
 
 
-def exchange(fd: int, buffer: bytearray, command: str, timeout: float) -> str:
+def exchange(fd: int, buffer: bytearray, command: str, deadline: float) -> str:
     header = f"@{secrets.token_hex(16)} "
-    deadline = time.monotonic() + timeout
     write_command(fd, header + command, deadline)
     return read_response(fd, buffer, deadline, header, command)
 
 
-def run_commands(fd: int, commands: list[str], timeout: float, wait: float) -> int:
-    buffer = bytearray()
-    try:
-        device_info = exchange(fd, buffer, "INFO", timeout)
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"Could not verify relay device: {exc}") from exc
+def verify_device(fd: int, buffer: bytearray, startup_timeout: float) -> None:
+    deadline = time.monotonic() + startup_timeout
+    while True:
+        probe_deadline = min(deadline, time.monotonic() + INFO_PROBE_WINDOW)
+        try:
+            device_info = exchange(fd, buffer, "INFO", probe_deadline)
+            break
+        except TimeoutError as exc:
+            if probe_deadline == deadline:
+                raise ValueError(f"Could not verify relay device: {exc}") from exc
+            # A partial line from the previous probe cannot finish the next one.
+            buffer.clear()
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Could not verify relay device: {exc}") from exc
     if device_info != EXPECTED_DEVICE_INFO:
         raise ValueError(f"Incompatible relay device response: {device_info}")
 
+
+def run_commands(
+    fd: int, commands: list[str], timeout: float, wait: float, startup_timeout: float
+) -> int:
+    buffer = bytearray()
+    verify_device(fd, buffer, startup_timeout)
+
     for idx, command in enumerate(commands):
         try:
-            resp = exchange(fd, buffer, command, timeout)
+            resp = exchange(fd, buffer, command, time.monotonic() + timeout)
         except (OSError, ValueError) as exc:
             print(f"ERR: {command}: {exc}", file=sys.stderr)
             return 2
@@ -232,10 +247,18 @@ def main() -> int:
         default=0.35,
         help="Response timeout in seconds per command (default: 0.35)",
     )
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=2.0,
+        help="Time in seconds to wait for a compatible INFO reply (default: 2)",
+    )
     args = parser.parse_args()
 
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and greater than zero")
+    if not math.isfinite(args.startup_timeout) or args.startup_timeout <= 0:
+        parser.error("--startup-timeout must be finite and greater than zero")
     if not math.isfinite(args.wait) or args.wait < 0:
         parser.error("--wait must be finite and nonnegative")
     try:
@@ -246,7 +269,7 @@ def main() -> int:
     try:
         port = args.port or find_default_port()
         with exclusive_serial(port, args.baud) as fd:
-            return run_commands(fd, commands, args.timeout, args.wait)
+            return run_commands(fd, commands, args.timeout, args.wait, args.startup_timeout)
     except (OSError, ValueError, termios.error) as exc:
         print(f"ERR: {exc}", file=sys.stderr)
         return 1
