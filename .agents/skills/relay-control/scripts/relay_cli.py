@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import math
 import os
 import select
 import sys
@@ -11,13 +12,14 @@ import time
 import tty
 
 
-def find_default_port() -> str | None:
-    patterns = ["/dev/cu.usbmodem*", "/dev/ttyACM*", "/dev/ttyUSB*"]
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            return matches[0]
-    return None
+def find_default_port() -> str:
+    patterns = ("/dev/cu.usbmodem*", "/dev/ttyACM*", "/dev/ttyUSB*")
+    ports = sorted(path for pattern in patterns for path in glob.glob(pattern))
+    if not ports:
+        raise ValueError("No USB serial port found. Specify a device with --port.")
+    if len(ports) > 1:
+        raise ValueError(f"Multiple USB serial ports found. Use --port: {', '.join(ports)}")
+    return ports[0]
 
 
 def configure_serial(fd: int, baud: int) -> None:
@@ -38,22 +40,52 @@ def configure_serial(fd: int, baud: int) -> None:
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
-def read_response(fd: int, timeout: float = 0.25, expected_lines: int = 1) -> str:
-    out = bytearray()
-    end = time.time() + timeout
-    while time.time() < end:
-        remaining = max(0.01, end - time.time())
-        ready, _, _ = select.select([fd], [], [], remaining)
-        if ready:
+def write_command(fd: int, command: str, deadline: float) -> None:
+    pending = memoryview((command + "\n").encode())
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
+            raise TimeoutError("Timed out writing command")
+        try:
+            written = os.write(fd, pending)
+        except BlockingIOError:
+            continue
+        if written == 0:
+            raise OSError("Serial port stopped accepting data")
+        pending = pending[written:]
+
+
+def read_response(fd: int, buffer: bytearray, deadline: float, *, diag: bool) -> str:
+    lines = []
+    while True:
+        newline = buffer.find(b"\n")
+        if newline < 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise TimeoutError("Timed out waiting for a complete response")
             try:
                 chunk = os.read(fd, 1024)
-                if chunk:
-                    out.extend(chunk)
-                    if out.count(b"\n") >= expected_lines:
-                        break
             except BlockingIOError:
-                pass
-    return out.decode(errors="replace").strip()
+                continue
+            if not chunk:
+                raise OSError("Serial port closed while waiting for a response")
+            buffer.extend(chunk)
+            continue
+
+        line = buffer[:newline].decode(errors="replace").strip()
+        del buffer[:newline + 1]
+        if not line or line.startswith("READY "):
+            continue
+        if not lines and line.startswith("ERR "):
+            return line
+        if not diag:
+            return line
+        prefix = "DIAG " if lines else "LIVE "
+        if not line.startswith(prefix):
+            raise ValueError(f"Unexpected diagnostic response: {line}")
+        lines.append(line)
+        if len(lines) == 2:
+            return "\n".join(lines)
 
 
 def main() -> int:
@@ -87,27 +119,39 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    port = args.port or find_default_port()
-    if not port:
-        print("ERR: No USB serial port found (/dev/cu.usbmodem* or /dev/ttyACM*).", file=sys.stderr)
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be finite and greater than zero")
+    if not math.isfinite(args.wait) or args.wait < 0:
+        parser.error("--wait must be finite and nonnegative")
+    if any(not cmd.strip() or any(c in cmd for c in "\r\n\0") for cmd in args.commands):
+        parser.error("each command must be a nonempty line without CR, LF, or NUL")
+
+    try:
+        port = args.port or find_default_port()
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            configure_serial(fd, args.baud)
+        except (OSError, ValueError, termios.error):
+            os.close(fd)
+            raise
+    except (OSError, ValueError, termios.error) as exc:
+        print(f"ERR: {exc}", file=sys.stderr)
         return 1
 
     had_error = False
-    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    buffer = bytearray()
     try:
-        configure_serial(fd, args.baud)
-        # Drain any initial boot message if the port open triggered output
-        init_msg = read_response(fd, timeout=0.1)
-        if init_msg:
-            print(f"[init] {init_msg}")
-
         for idx, cmd in enumerate(args.commands):
             clean_cmd = cmd.strip()
-            expected_lines = 2 if clean_cmd.upper() == "DIAG" else 1
-            os.write(fd, (clean_cmd + "\n").encode())
-            resp = read_response(fd, timeout=args.timeout, expected_lines=expected_lines)
+            deadline = time.monotonic() + args.timeout
+            try:
+                write_command(fd, clean_cmd, deadline)
+                resp = read_response(fd, buffer, deadline, diag=clean_cmd.upper() == "DIAG")
+            except (OSError, ValueError) as exc:
+                print(f"ERR: {clean_cmd}: {exc}", file=sys.stderr)
+                return 2
             print(f"> {clean_cmd}\n< {resp}")
-            if not resp or resp.startswith("ERR "):
+            if resp.startswith("ERR "):
                 had_error = True
             if args.wait > 0 and idx + 1 < len(args.commands):
                 time.sleep(args.wait)
