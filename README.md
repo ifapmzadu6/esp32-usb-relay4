@@ -50,16 +50,17 @@ flowchart LR
 - 5V フォトカプラ絶縁リレーモジュールを **L ジャンパ（Low-level trigger）** 設定で使用する前提です。
 - 3.3V の HIGH 出力ではモジュール側の入力 LED とフォトカプラ LED を直列に駆動する電圧が不足するため、全チャンネルを `OUTPUT_OPEN_DRAIN`（Active-Low）で制御しています。
   - **ON**: `LOW` を出力して電流をシンク
-  - **OFF**: `HIGH` を出力してフローティング（ハイインピーダンス）にし、5V ラインとの競合を回避
-- 起動時のリセットで一瞬リレーが ON にならないよう、`INPUT` → 非アクティブレベル（`HIGH`）のラッチ → `OUTPUT_OPEN_DRAIN` の順で初期化しています。
+  - **OFF**: オープンドレイン出力で `HIGH` を設定し、GPIO をハイインピーダンスにします。モジュール側から GPIO にかかる電圧は ESP32-C3 の入力電圧仕様内に収めてください。
+- ファームウェア起動時は `INPUT` → 非アクティブレベル（`HIGH`）のラッチ → `OUTPUT_OPEN_DRAIN` の順で初期化します。ESP32-C3 の電源投入時にはファームウェア実行前に GPIO10 が短時間 LOW になる場合があります。使用する負荷を接続する前に、起動時のリレー動作を実機で確認してください。[ESP32-C3 データシート（表 2-2、表 5-4）](https://documentation.espressif.com/esp32-c3_datasheet_en.html)
 - 起動後、USB シリアル接続を最大 1500ms 待機したうえで `READY esp32-usb-relay4` を出力します。
+- USB シリアル接続が切れても、ESP32-C3 とリレーに給電が続く間は最後に設定した出力状態を保持します。
 
 ```mermaid
 flowchart TD
     CMD["リレー制御状態"] -->|ON| LOW["GPIO = LOW (シンク)"]
     CMD -->|OFF| HIZ["GPIO = HIGH (オープンドレイン / Hi-Z)"]
     LOW -->|"5V -> LED -> GPIO へ電流が流れる"| RELAY_ON["リレー ON"]
-    HIZ -->|"電流が流れず 5V 側とも競合しない"| RELAY_OFF["リレー OFF"]
+    HIZ -->|"GPIO が電流のシンクを停止"| RELAY_OFF["リレー OFF"]
 ```
 
 ## ビルド・書き込み・モニター
@@ -79,7 +80,9 @@ pio device monitor
 
 ## シリアルコマンド仕様
 
-コマンドは `\n` 区切り（`\r` は無視）で受け付けます。前後の空白は除去され、大文字・小文字は区別されません。1 行の上限は 63 文字です。
+コマンドは `\n` 区切り（`\r` は無視）で受け付けます。前後の空白は除去され、大文字・小文字は区別されません。コマンド本体の上限は 63 バイトです。
+
+行頭に `@<32桁の16進数>` とスペースを付けると、ファームウェアは要求 ID をそのまま応答の各行に付けます。`DIAG` の `LIVE` 行と `DIAG` 行、要求 ID を読み取れた場合のエラー行にも同じ ID が付きます。起動メッセージと、要求 ID を付けずに送ったコマンドの応答には ID が付きません。
 
 ```mermaid
 sequenceDiagram
@@ -120,7 +123,8 @@ sequenceDiagram
 - `ERR RELAY PIN`: `TEST <pin>` にリレー出力の GPIO ピンを指定した場合
 - `ERR UNKNOWN COMMAND`: 未定義のコマンドを受信した場合
 - `ERR INVALID CHARACTER`: 行に NUL が含まれている場合（次の改行まで読み捨てられます）
-- `ERR COMMAND TOO LONG`: 1 行が 63 文字を超えた場合（次の改行まで読み捨てられます）
+- `ERR INVALID REQUEST ID`: 行が `@` で始まり、要求 ID の形式が不正な場合
+- `ERR COMMAND TOO LONG`: コマンド本体が 63 バイトを超えた場合（次の改行まで読み捨てられます）
 
 ## CLI ヘルパー / AI スキル
 
@@ -134,4 +138,4 @@ python3 .agents/skills/relay-control/scripts/relay_cli.py STATUS
 python3 .agents/skills/relay-control/scripts/relay_cli.py "ON 1" "ON 2" STATUS
 ```
 
-シリアルポートの候補が複数ある場合は `--port` で接続先を指定します。応答が途中で途切れた場合、CLI はエラーを返して残りのコマンドの送信を中止します。
+シリアルポートの候補が複数ある場合は `--port` で接続先を指定します。CLI はコマンドごとに新しい要求 ID を生成するため、要求 ID に対応したファームウェアが必要です。現在の要求 ID が付いた応答を受け取れなかった場合、CLI はエラーを返して残りのコマンドの送信を中止します。タイムアウトしたコマンドが実行済みか確認するには、`STATUS` を送ってください。

@@ -5,6 +5,7 @@ import argparse
 import glob
 import math
 import os
+import secrets
 import select
 import sys
 import termios
@@ -55,14 +56,36 @@ def write_command(fd: int, command: str, deadline: float) -> None:
         pending = pending[written:]
 
 
-def read_response(fd: int, buffer: bytearray, deadline: float, *, diag: bool) -> str:
+def expected_responses(command: str) -> tuple[str, ...]:
+    command = command.upper()
+    if command == "DIAG":
+        return ("LIVE ", "DIAG ")
+    if command == "STATUS":
+        return ("STATUS ",)
+    if command in ("HELP", "?"):
+        return ("COMMANDS: ",)
+    if command in ("ALL ON", "ALL OFF"):
+        return (f"OK {command}",)
+    verb, _, arg = command.partition(" ")
+    if verb in ("ON", "OFF") and arg.lstrip() in ("1", "2", "3", "4"):
+        return (f"OK {verb} {arg.lstrip()}",)
+    if verb == "TEST":
+        return ("TEST ",)
+    return ()
+
+
+def read_response(
+    fd: int, buffer: bytearray, deadline: float, header: str, command: str
+) -> str:
+    expected = expected_responses(command)
+    prefix = header.encode("ascii")
     lines = []
     while True:
         newline = buffer.find(b"\n")
         if newline < 0:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
-                raise TimeoutError("Timed out waiting for a complete response")
+                raise TimeoutError("Timed out waiting for a complete response with the request ID")
             try:
                 chunk = os.read(fd, 1024)
             except BlockingIOError:
@@ -72,19 +95,20 @@ def read_response(fd: int, buffer: bytearray, deadline: float, *, diag: bool) ->
             buffer.extend(chunk)
             continue
 
-        line = buffer[:newline].decode(errors="replace").strip()
+        raw_line = buffer[:newline]
         del buffer[:newline + 1]
-        if not line or line.startswith("READY "):
+        if not raw_line.startswith(prefix):
             continue
+        line = raw_line[len(prefix):].decode(errors="replace").strip()
         if not lines and line.startswith("ERR "):
             return line
-        if not diag:
-            return line
-        prefix = "DIAG " if lines else "LIVE "
-        if not line.startswith(prefix):
-            raise ValueError(f"Unexpected diagnostic response: {line}")
+        pattern = expected[len(lines)] if len(lines) < len(expected) else None
+        if pattern is None or not (
+            line.startswith(pattern) if pattern.endswith(" ") else line == pattern
+        ):
+            raise ValueError(f"Unexpected response: {line}")
         lines.append(line)
-        if len(lines) == 2:
+        if len(lines) == len(expected):
             return "\n".join(lines)
 
 
@@ -143,10 +167,11 @@ def main() -> int:
     try:
         for idx, cmd in enumerate(args.commands):
             clean_cmd = cmd.strip()
+            header = f"@{secrets.token_hex(16)} "
             deadline = time.monotonic() + args.timeout
             try:
-                write_command(fd, clean_cmd, deadline)
-                resp = read_response(fd, buffer, deadline, diag=clean_cmd.upper() == "DIAG")
+                write_command(fd, header + clean_cmd, deadline)
+                resp = read_response(fd, buffer, deadline, header, clean_cmd)
             except (OSError, ValueError) as exc:
                 print(f"ERR: {clean_cmd}: {exc}", file=sys.stderr)
                 return 2
