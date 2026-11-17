@@ -150,3 +150,14 @@ CLI は最初に要求 ID を付けて `INFO` を送信し、機種名とシリ�
 ポートを開く前に、指定されたすべてのコマンドの書式、チャンネル番号、`TEST` の対象 GPIO を検査します。入力エラーがある場合は、何番目の引数かを表示して終了します。送信後にエラーが発生した場合、それ以前に実行されたコマンドの効果は残ります。
 
 CLI は `STATUS`、`DIAG`、`TEST` の応答に必要な項目がすべて揃っていることを検査します。不正な応答や、要求 ID を含めて 256 バイトを超える受信行もエラーとして扱います。
+
+## 回帰テスト
+
+macOS または Linux では、`python3 -m unittest discover -s tests -v` で仮想シリアルポートを使った CLI テストを実行できます。C++ コンパイラがあれば、ファームウェアのコマンド処理をホスト向けにビルドし、CLI との組み合わせも検証できます。
+
+```bash
+mkdir -p build
+c++ -std=c++11 -Wall -Wextra -Werror -I tests/firmware \
+  src/main.cpp tests/firmware/mock.cpp -o build/relay-firmware-mock
+RELAY_FIRMWARE_MOCK=build/relay-firmware-mock python3 -m unittest discover -s tests -v
+```
