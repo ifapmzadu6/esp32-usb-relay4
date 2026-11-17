@@ -20,7 +20,7 @@ Controls and diagnoses the `esp32-usb-relay4` ESP32-C3 firmware over USB CDC ser
 
 Use the zero-dependency helper script [relay_cli.py](./scripts/relay_cli.py) (no `pyserial` required). It auto-detects `/dev/cu.usbmodem*` (macOS) or `/dev/ttyACM*` (Linux).
 
-The CLI requires firmware that echoes request IDs. If a control command times out, run `STATUS` to check whether it took effect.
+The CLI requires firmware that supports ASCII CAN frame cancellation and echoes request IDs. Close other serial monitors before using the CLI. A device error or a timeout stops the remaining commands. If a control command times out, run `STATUS` to check whether it took effect.
 
 ### Common Commands
 
