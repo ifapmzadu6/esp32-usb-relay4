@@ -14,6 +14,8 @@ CLI = (
     / ".agents/skills/relay-control/scripts/relay_cli.py"
 )
 RELAY_INFO = b"INFO esp32-usb-relay4 PROTOCOL 1"
+LIVE = b"LIVE 2=0 3=1 4=1 10=1"
+DIAG = b"DIAG 0=0 1=0 2=- 3=0 4=0 5=0 6=0 7=0 8=1 9=1 10=0 20=0 21=0"
 
 
 class RelayCLITest(unittest.TestCase):
@@ -126,3 +128,47 @@ class RelayCLITest(unittest.TestCase):
             out, err = process.communicate(timeout=3)
             self.assertEqual(process.returncode, 0, err)
             self.assertIn("TEST 5 PP_LOW=", out)
+
+    def test_rejects_malformed_replies_before_sending_next_command(self):
+        cases = (
+            ("STATUS", [b"STATUS 1:ON 2:OFF 3:OFF"]),
+            ("STATUS", [b"STATUS 1:ON 2:OFF 2:OFF 4:OFF"]),
+            ("STATUS", [b"STATUS 1:ON 2:OFF 3:OFF 4:UNKNOWN"]),
+            ("DIAG", [b"LIVE 2=0 3=1 4=1"]),
+            ("DIAG", [LIVE, DIAG.replace(b"5=0", b"5=-")]),
+            ("TEST 5", [b"TEST 5 PP_LOW=0 PP_HIGH=1 OD_LOW=0"]),
+        )
+        for command, replies in cases:
+            with self.subTest(command=command, replies=replies):
+                with self.start_cli(command, "ALL ON") as process:
+                    self.verify_device()
+                    header = self.read_request(command.encode())
+                    for reply in replies:
+                        self.send_reply(header, reply)
+                    out, err = process.communicate(timeout=3)
+                    self.assertEqual(process.returncode, 2)
+                    self.assertEqual(out, "")
+                    self.assertIn("Unexpected response", err)
+                    self.assert_no_pending_request()
+
+    def test_accepts_complete_diag_sent_in_chunks(self):
+        with self.start_cli("DIAG") as process:
+            self.verify_device()
+            header = self.read_request(b"DIAG")
+            self.send_reply(header, LIVE)
+            os.write(self.master, header + DIAG[:24])
+            os.write(self.master, DIAG[24:] + b"\r\n")
+            out, err = process.communicate(timeout=3)
+            self.assertEqual(process.returncode, 0, err)
+            self.assertIn(DIAG.decode(), out)
+
+    def test_rejects_overlong_line_with_or_without_newline(self):
+        for terminator in (b"", b"\n"):
+            with self.subTest(terminator=terminator), self.start_cli("STATUS", "ALL ON") as process:
+                self.verify_device()
+                header = self.read_request(b"STATUS")
+                os.write(self.master, header + b"STATUS " + b"x" * 256 + terminator)
+                _, err = process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 2)
+                self.assertIn("Response line exceeds 256 bytes", err)
+                self.assert_no_pending_request()

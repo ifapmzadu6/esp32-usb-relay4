@@ -7,6 +7,7 @@ import fcntl
 import glob
 import math
 import os
+import re
 import secrets
 import select
 import sys
@@ -18,8 +19,21 @@ import tty
 CANCEL_FRAME = "\x18"
 EXPECTED_DEVICE_INFO = "INFO esp32-usb-relay4 PROTOCOL 1"
 COMMAND_MAX_LENGTH = 63
-# The protocol 1 board mapping reserves GPIO 2, 3, 4 and 10 for relays.
+MAX_RESPONSE_LINE_BYTES = 256
+# GPIO assignments in protocol 1.
+RELAY_PINS = (2, 3, 4, 10)
 TEST_PINS = {0, 1, 5, 6, 7, 8, 9, 20, 21}
+STATUS_RESPONSE = "STATUS" + "".join(
+    f" {channel}:(?:ON|OFF)" for channel in range(1, len(RELAY_PINS) + 1)
+)
+LIVE_RESPONSE = "LIVE" + "".join(f" {pin}=[01]" for pin in RELAY_PINS)
+DIAG_RESPONSE = "DIAG" + "".join(
+    f" {pin}=" + ("[01-]" if pin in RELAY_PINS else "[01]")
+    for pin in sorted(set(RELAY_PINS) | TEST_PINS)
+)
+PIN_TEST_FIELDS = " ".join(
+    f"{field}=[01]" for field in ("PP_LOW", "PP_HIGH", "OD_LOW", "OD_HIGH")
+)
 
 
 def find_default_port() -> str:
@@ -83,16 +97,16 @@ def write_command(fd: int, command: str, deadline: float) -> None:
         pending = pending[written:]
 
 
-def expected_responses(command: str) -> tuple[str, ...]:
+def response_patterns(command: str) -> tuple[str, ...]:
     command = command.upper()
     if command == "INFO":
-        return ("INFO ",)
+        return (r"INFO \S+ PROTOCOL [0-9]+",)
     if command == "DIAG":
-        return ("LIVE ", "DIAG ")
+        return (LIVE_RESPONSE, DIAG_RESPONSE)
     if command == "STATUS":
-        return ("STATUS ",)
+        return (STATUS_RESPONSE,)
     if command in ("HELP", "?"):
-        return ("COMMANDS: ",)
+        return ("COMMANDS: .+",)
     if command in ("ALL ON", "ALL OFF"):
         return (f"OK {command}",)
     verb, _, arg = command.partition(" ")
@@ -102,7 +116,7 @@ def expected_responses(command: str) -> tuple[str, ...]:
     if verb == "TEST" and arg.isdecimal():
         pin = int(arg)
         if pin in TEST_PINS:
-            return (f"TEST {pin} ",)
+            return (f"TEST {pin} {PIN_TEST_FIELDS}",)
     return ()
 
 
@@ -114,7 +128,7 @@ def validate_commands(commands: list[str]) -> list[str]:
             raise ValueError(f"command {index} must be a nonempty line without CR, LF, NUL, or CAN")
         if not command.isascii() or len(command) > COMMAND_MAX_LENGTH:
             raise ValueError(f"command {index} must fit in {COMMAND_MAX_LENGTH} ASCII bytes")
-        if not expected_responses(command):
+        if not response_patterns(command):
             raise ValueError(f"invalid command {index}: {command!r}")
         validated.append(command)
     return validated
@@ -123,11 +137,13 @@ def validate_commands(commands: list[str]) -> list[str]:
 def read_response(
     fd: int, buffer: bytearray, deadline: float, header: str, command: str
 ) -> str:
-    expected = expected_responses(command)
+    expected = response_patterns(command)
     prefix = header.encode("ascii")
     lines = []
     while True:
         newline = buffer.find(b"\n")
+        if (newline if newline >= 0 else len(buffer)) > MAX_RESPONSE_LINE_BYTES:
+            raise ValueError(f"Response line exceeds {MAX_RESPONSE_LINE_BYTES} bytes")
         if newline < 0:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
@@ -145,14 +161,13 @@ def read_response(
         del buffer[:newline + 1]
         if not raw_line.startswith(prefix):
             continue
-        line = raw_line[len(prefix):].decode(errors="replace").strip()
-        if not lines and line.startswith("ERR "):
+        line = raw_line[len(prefix):].removesuffix(b"\r").decode(errors="replace")
+        if not line.isascii() or not line.isprintable():
+            raise ValueError(f"Unexpected response: {line!r}")
+        if not lines and re.fullmatch("ERR .+", line):
             return line
-        pattern = expected[len(lines)] if len(lines) < len(expected) else None
-        if pattern is None or not (
-            line.startswith(pattern) if pattern.endswith(" ") else line == pattern
-        ):
-            raise ValueError(f"Unexpected response: {line}")
+        if len(lines) == len(expected) or not re.fullmatch(expected[len(lines)], line):
+            raise ValueError(f"Unexpected response: {line!r}")
         lines.append(line)
         if len(lines) == len(expected):
             return "\n".join(lines)
