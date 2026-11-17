@@ -39,11 +39,11 @@ python3 .agents/skills/relay-control/scripts/relay_cli.py -w 0.5 "ON 1" "ON 2" "
 ### Diagnostics & Pin Testing
 
 ```bash
-# Check live relay pin levels and probe all usable GPIOs for module pullups
+# Check live relay levels and probe pullups (energized relay pins show "-" in DIAG)
 python3 .agents/skills/relay-control/scripts/relay_cli.py DIAG
 
-# Test Push-Pull and Open-Drain drive/readback on a specific GPIO (e.g. GPIO2)
-python3 .agents/skills/relay-control/scripts/relay_cli.py "TEST 2"
+# Test Push-Pull and Open-Drain drive/readback on an unused, disconnected GPIO
+python3 .agents/skills/relay-control/scripts/relay_cli.py "TEST 5"
 ```
 
 ## Verification

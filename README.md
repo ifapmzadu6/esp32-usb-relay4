@@ -110,14 +110,16 @@ sequenceDiagram
 
 | コマンド | 説明 | 応答形式 |
 | :--- | :--- | :--- |
-| `DIAG` | 現在のリレーピン状態（`LIVE`）を出力したうえで、利用可能 GPIO（`0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21`）を一時的に `INPUT_PULLDOWN` にしてモジュール側からのプルアップ有無を確認し、リレー出力を復帰します（`GPIO8`/`9` はオンボードプルアップにより通常 `1` になります）。 | `LIVE 2=<0\|1> 3=<0\|1> 4=<0\|1> 10=<0\|1>`<br>`DIAG 0=<0\|1> 1=<0\|1> ...` |
-| `TEST <pin>` | 指定した安全な GPIO ピン（`0..10, 20, 21`）を Push-Pull（`PP_LOW`/`PP_HIGH`）および Open-Drain（`OD_LOW`/`OD_HIGH`）で駆動してリードバックし、その後リレー出力を復帰します。 | `TEST <pin> PP_LOW=<0\|1> PP_HIGH=<0\|1> OD_LOW=<0\|1> OD_HIGH=<0\|1>` |
+| `DIAG` | リレーピンの現在レベル（`LIVE`）を読み取り、GPIO `0..10, 20, 21` のプルアップを `INPUT_PULLDOWN` で調べます。ON のリレーピンは駆動を維持し、`DIAG` 行に `-` と表示します。GPIO8/9 はオンボードプルアップにより通常 `1` になります。 | `LIVE 2=<0\|1> 3=<0\|1> 4=<0\|1> 10=<0\|1>`<br>`DIAG 0=<0\|1> 1=<0\|1> 2=<0\|1\|-> ...` |
+| `TEST <pin>` | リレーに割り当てていない GPIO（`0, 1, 5..9, 20, 21`）を Push-Pull と Open-Drain で駆動してレベルを読み取り、最後に入力へ戻します。外部回路を接続していないピンで使用してください。 | `TEST <pin> PP_LOW=<0\|1> PP_HIGH=<0\|1> OD_LOW=<0\|1> OD_HIGH=<0\|1>` |
 
 ### エラー応答
 
 - `ERR INVALID CHANNEL (expected 1-4)`: `ON` / `OFF` のチャンネル指定が `1`〜`4` 以外の場合
 - `ERR INVALID PIN`: `TEST <pin>` に不正または対象外の GPIO ピンを指定した場合
+- `ERR RELAY PIN`: `TEST <pin>` にリレー出力の GPIO ピンを指定した場合
 - `ERR UNKNOWN COMMAND`: 未定義のコマンドを受信した場合
+- `ERR INVALID CHARACTER`: 行に NUL が含まれている場合（次の改行まで読み捨てられます）
 - `ERR COMMAND TOO LONG`: 1 行が 63 文字を超えた場合（次の改行まで読み捨てられます）
 
 ## CLI ヘルパー / AI スキル
@@ -131,3 +133,5 @@ sequenceDiagram
 python3 .agents/skills/relay-control/scripts/relay_cli.py STATUS
 python3 .agents/skills/relay-control/scripts/relay_cli.py "ON 1" "ON 2" STATUS
 ```
+
+シリアルポートの候補が複数ある場合は `--port` で接続先を指定します。応答が途中で途切れた場合、CLI はエラーを返して残りのコマンドの送信を中止します。

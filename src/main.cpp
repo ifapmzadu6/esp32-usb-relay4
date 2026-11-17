@@ -10,7 +10,7 @@ constexpr size_t kRelayCount = 4;
 // Relay channels 1..4 mapped to GPIO2, GPIO3, GPIO4, GPIO10.
 constexpr uint8_t kRelayPins[kRelayCount] = {2, 3, 4, 10};
 
-// Safe user-accessible GPIOs on ESP32-C3 (excludes USB D+/D- and flash pins).
+// User-accessible GPIOs on ESP32-C3 (excludes USB D+/D- and flash pins).
 constexpr uint8_t kUsablePins[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21};
 
 // The 5V opto-isolated module does not trigger reliably from a 3.3V HIGH
@@ -26,7 +26,7 @@ constexpr size_t kCmdBufSize = 64;
 bool relayStates[kRelayCount] = {false, false, false, false};
 char cmdBuf[kCmdBufSize];
 size_t cmdLen = 0;
-bool discardingOverflow = false;
+bool discardingLine = false;
 
 uint8_t logicLevel(bool on) {
   const bool high = kRelayActiveLow ? !on : on;
@@ -59,16 +59,17 @@ void printHelp() {
   Serial.println("COMMANDS: ON <1-4> | OFF <1-4> | ALL ON | ALL OFF | STATUS | DIAG | TEST <pin> | HELP");
 }
 
-void restoreRelayOutputs() {
+size_t relayIndexForPin(uint8_t pin) {
   for (size_t i = 0; i < kRelayCount; ++i) {
-    digitalWrite(kRelayPins[i], logicLevel(relayStates[i]));
-    pinMode(kRelayPins[i], kRelayPinMode);
+    if (kRelayPins[i] == pin) {
+      return i;
+    }
   }
+  return kRelayCount;
 }
 
-// Wiring check: releases each usable GPIO, applies the weak internal pulldown
-// and reads it. A pin wired to a powered module input (L jumper) is pulled up
-// through the module and reads 1; an unconnected pin reads 0.
+// Wiring check: applies the weak internal pulldown to each pin that isn't
+// driving an active relay. A powered module input (L jumper) pulls it high.
 // GPIO8/9 usually read 1 because of on-board pullups.
 void printDiag() {
   // Actual pin levels while the relay outputs are still being driven.
@@ -82,43 +83,57 @@ void printDiag() {
   Serial.println();
   Serial.print("DIAG");
   for (const uint8_t pin : kUsablePins) {
-    pinMode(pin, INPUT_PULLDOWN);
-    delay(5);
-    const int level = digitalRead(pin);
-    pinMode(pin, INPUT);
     Serial.print(' ');
     Serial.print(pin);
     Serial.print('=');
+    const size_t relayIndex = relayIndexForPin(pin);
+    if (relayIndex < kRelayCount && relayStates[relayIndex]) {
+      Serial.print('-');
+      continue;
+    }
+
+    pinMode(pin, INPUT_PULLDOWN);
+    delay(5);
+    const int level = digitalRead(pin);
+    if (relayIndex < kRelayCount) {
+      // The output latch retains the inactive level while in input mode.
+      pinMode(pin, kRelayPinMode);
+    } else {
+      pinMode(pin, INPUT);
+    }
     Serial.print(level);
   }
   Serial.println();
-  restoreRelayOutputs();
 }
 
 // Output check: drives a pin push-pull and open-drain, reading back each level.
 void printPinTest(uint8_t pin) {
-  Serial.print("TEST ");
-  Serial.print(pin);
-  pinMode(pin, OUTPUT);
+  pinMode(pin, INPUT);
   digitalWrite(pin, LOW);
+  pinMode(pin, OUTPUT);
   delay(5);
-  Serial.print(" PP_LOW=");
-  Serial.print(digitalRead(pin));
+  const int pushPullLow = digitalRead(pin);
   digitalWrite(pin, HIGH);
   delay(5);
-  Serial.print(" PP_HIGH=");
-  Serial.print(digitalRead(pin));
+  const int pushPullHigh = digitalRead(pin);
   pinMode(pin, OUTPUT_OPEN_DRAIN);
   digitalWrite(pin, LOW);
   delay(5);
-  Serial.print(" OD_LOW=");
-  Serial.print(digitalRead(pin));
+  const int openDrainLow = digitalRead(pin);
   digitalWrite(pin, HIGH);
   delay(5);
-  Serial.print(" OD_HIGH=");
-  Serial.println(digitalRead(pin));
+  const int openDrainHigh = digitalRead(pin);
   pinMode(pin, INPUT);
-  restoreRelayOutputs();
+  Serial.print("TEST ");
+  Serial.print(pin);
+  Serial.print(" PP_LOW=");
+  Serial.print(pushPullLow);
+  Serial.print(" PP_HIGH=");
+  Serial.print(pushPullHigh);
+  Serial.print(" OD_LOW=");
+  Serial.print(openDrainLow);
+  Serial.print(" OD_HIGH=");
+  Serial.println(openDrainHigh);
 }
 
 void normalizeCommand(char *buf) {
@@ -221,6 +236,10 @@ void handleCommand(char *line) {
       Serial.println("ERR INVALID PIN");
       return;
     }
+    if (relayIndexForPin(pin) < kRelayCount) {
+      Serial.println("ERR RELAY PIN");
+      return;
+    }
     printPinTest(pin);
     return;
   }
@@ -271,24 +290,25 @@ void loop() {
       continue;
     }
     if (c == '\n') {
-      if (discardingOverflow) {
-        discardingOverflow = false;
-      } else {
+      if (!discardingLine) {
         cmdBuf[cmdLen] = '\0';
         handleCommand(cmdBuf);
       }
       cmdLen = 0;
+      discardingLine = false;
       continue;
     }
-    if (discardingOverflow) {
+    if (discardingLine) {
       continue;
     }
-    if (cmdLen + 1 < kCmdBufSize) {
+    if (c == '\0') {
+      // Reject the whole line instead of executing the prefix before the NUL.
+      discardingLine = true;
+      Serial.println("ERR INVALID CHARACTER");
+    } else if (cmdLen + 1 < kCmdBufSize) {
       cmdBuf[cmdLen++] = c;
     } else {
-      // Discard the rest of the overflowed line until the next newline.
-      cmdLen = 0;
-      discardingOverflow = true;
+      discardingLine = true;
       Serial.println("ERR COMMAND TOO LONG");
     }
   }
