@@ -2,6 +2,8 @@
 """Zero-dependency USB serial CLI for esp32-usb-relay4."""
 
 import argparse
+from contextlib import contextmanager, suppress
+import fcntl
 import glob
 import math
 import os
@@ -11,6 +13,9 @@ import sys
 import termios
 import time
 import tty
+
+
+CANCEL_FRAME = "\x18"
 
 
 def find_default_port() -> str:
@@ -41,8 +46,26 @@ def configure_serial(fd: int, baud: int) -> None:
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
+@contextmanager
+def exclusive_serial(port: str, baud: int):
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        # Cover simultaneous CLI opens before the kernel's TTY flag is set.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.ioctl(fd, termios.TIOCEXCL)
+        try:
+            configure_serial(fd, baud)
+            yield fd
+        finally:
+            # The port may already have disappeared due to a disconnect.
+            with suppress(OSError):
+                fcntl.ioctl(fd, termios.TIOCNXCL)
+    finally:
+        os.close(fd)
+
+
 def write_command(fd: int, command: str, deadline: float) -> None:
-    pending = memoryview((command + "\n").encode())
+    pending = memoryview((CANCEL_FRAME + command + "\n").encode())
     while pending:
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
@@ -112,6 +135,26 @@ def read_response(
             return "\n".join(lines)
 
 
+def run_commands(fd: int, commands: list[str], timeout: float, wait: float) -> int:
+    buffer = bytearray()
+    for idx, cmd in enumerate(commands):
+        clean_cmd = cmd.strip()
+        header = f"@{secrets.token_hex(16)} "
+        deadline = time.monotonic() + timeout
+        try:
+            write_command(fd, header + clean_cmd, deadline)
+            resp = read_response(fd, buffer, deadline, header, clean_cmd)
+        except (OSError, ValueError) as exc:
+            print(f"ERR: {clean_cmd}: {exc}", file=sys.stderr)
+            return 2
+        print(f"> {clean_cmd}\n< {resp}")
+        if resp.startswith("ERR "):
+            return 2
+        if wait > 0 and idx + 1 < len(commands):
+            time.sleep(wait)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Send serial commands to esp32-usb-relay4."
@@ -147,44 +190,19 @@ def main() -> int:
         parser.error("--timeout must be finite and greater than zero")
     if not math.isfinite(args.wait) or args.wait < 0:
         parser.error("--wait must be finite and nonnegative")
-    if any(not cmd.strip() or any(c in cmd for c in "\r\n\0") for cmd in args.commands):
-        parser.error("each command must be a nonempty line without CR, LF, or NUL")
+    if any(
+        not cmd.strip() or any(c in cmd for c in ("\r", "\n", "\0", CANCEL_FRAME))
+        for cmd in args.commands
+    ):
+        parser.error("each command must be a nonempty line without CR, LF, NUL, or CAN")
 
     try:
         port = args.port or find_default_port()
-        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        try:
-            configure_serial(fd, args.baud)
-        except (OSError, ValueError, termios.error):
-            os.close(fd)
-            raise
+        with exclusive_serial(port, args.baud) as fd:
+            return run_commands(fd, args.commands, args.timeout, args.wait)
     except (OSError, ValueError, termios.error) as exc:
         print(f"ERR: {exc}", file=sys.stderr)
         return 1
-
-    had_error = False
-    buffer = bytearray()
-    try:
-        for idx, cmd in enumerate(args.commands):
-            clean_cmd = cmd.strip()
-            header = f"@{secrets.token_hex(16)} "
-            deadline = time.monotonic() + args.timeout
-            try:
-                write_command(fd, header + clean_cmd, deadline)
-                resp = read_response(fd, buffer, deadline, header, clean_cmd)
-            except (OSError, ValueError) as exc:
-                print(f"ERR: {clean_cmd}: {exc}", file=sys.stderr)
-                return 2
-            print(f"> {clean_cmd}\n< {resp}")
-            if resp.startswith("ERR "):
-                had_error = True
-            if args.wait > 0 and idx + 1 < len(args.commands):
-                time.sleep(args.wait)
-    finally:
-        os.close(fd)
-
-    return 2 if had_error else 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -24,11 +25,30 @@ constexpr uint8_t kRelayPinMode = kRelayActiveLow ? OUTPUT_OPEN_DRAIN : OUTPUT;
 constexpr size_t kCommandMaxLength = 63;
 constexpr size_t kRequestIdLength = 32;
 constexpr size_t kRequestHeaderLength = kRequestIdLength + 2;  // '@' and space
+constexpr char kCancelFrame = '\x18';  // ASCII CAN
+constexpr unsigned long kFrameIdleTimeoutMs = 2000;
 
 bool relayStates[kRelayCount] = {false, false, false, false};
 char cmdBuf[kRequestHeaderLength + kCommandMaxLength + 1];
 size_t cmdLen = 0;
 bool discardingLine = false;
+unsigned long lastCommandByteAt = 0;
+std::atomic<bool> usbResetPending{false};
+
+void onUsbReset(void *, esp_event_base_t, int32_t, void *) {
+  usbResetPending.store(true);
+}
+
+void discardPendingInput() {
+  const int queued = Serial.available();
+  if (cmdLen > 0 || queued > 0) {
+    cmdLen = 0;
+    discardingLine = true;
+  }
+  for (int i = 0; i < queued; ++i) {
+    Serial.read();
+  }
+}
 
 bool hasRequestHeader(const char *line, size_t length) {
   if (length < kRequestHeaderLength || line[0] != '@' ||
@@ -310,6 +330,7 @@ void setup() {
     pinMode(kRelayPins[i], kRelayPinMode);
   }
 
+  Serial.onEvent(ARDUINO_HW_CDC_BUS_RESET_EVENT, onUsbReset);
   Serial.begin(115200);
   const unsigned long waitStart = millis();
   while (!Serial && (millis() - waitStart < 1500)) {
@@ -319,8 +340,28 @@ void setup() {
 }
 
 void loop() {
-  while (Serial.available() > 0) {
-    const char c = static_cast<char>(Serial.read());
+  while (true) {
+    const bool plugged = Serial.isPlugged();
+    if (usbResetPending.exchange(false) || !plugged) {
+      discardPendingInput();
+    }
+    if (!plugged) {
+      return;
+    }
+    if (cmdLen > 0 && millis() - lastCommandByteAt >= kFrameIdleTimeoutMs) {
+      cmdLen = 0;
+      discardingLine = true;
+    }
+    const int byte = Serial.read();
+    if (byte < 0) {
+      return;
+    }
+    const char c = static_cast<char>(byte);
+    if (c == kCancelFrame) {
+      cmdLen = 0;
+      discardingLine = false;
+      continue;
+    }
     if (c == '\r') {
       continue;
     }
@@ -340,6 +381,7 @@ void loop() {
         (cmdLen > 0 && cmdBuf[0] == '@' ? kRequestHeaderLength : 0);
     if (c != '\0' && cmdLen < limit) {
       cmdBuf[cmdLen++] = c;
+      lastCommandByteAt = millis();
       continue;
     }
     // Reject the whole line, keeping the request ID if the header was valid.
