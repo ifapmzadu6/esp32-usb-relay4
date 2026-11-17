@@ -93,7 +93,7 @@ class RelayCLITest(unittest.TestCase):
                 self.assert_no_pending_request()
 
     def test_rejects_stale_or_untagged_device_info(self):
-        with self.start_cli("ALL ON") as process:
+        with self.start_cli("--startup-timeout", "0.15", "ALL ON") as process:
             header = self.read_request(b"INFO")
             stale = b"@0" + header[2:] if header[1:2] != b"0" else b"@1" + header[2:]
             self.send_reply(stale, RELAY_INFO)
@@ -102,6 +102,38 @@ class RelayCLITest(unittest.TestCase):
             self.assertEqual(process.returncode, 1)
             self.assertEqual(out, "")
             self.assertIn("Could not verify relay device", err)
+            self.assert_no_pending_request()
+
+    def test_retries_startup_probe_and_ignores_first_probe_reply(self):
+        with self.start_cli("ON 1") as process:
+            first = self.read_request(b"INFO")
+            os.write(self.master, first + b"INFO incomplete")
+            second = self.read_request(b"INFO")
+            self.assertNotEqual(first, second)
+            self.send_reply(b"", b"READY esp32-usb-relay4")
+            self.send_reply(first, RELAY_INFO)
+            self.send_reply(second, RELAY_INFO)
+            self.send_reply(self.read_request(b"ON 1"), b"OK ON 1")
+            out, err = process.communicate(timeout=3)
+            self.assertEqual(process.returncode, 0, err)
+            self.assertIn("OK ON 1", out)
+
+    def test_startup_deadline_stops_unanswered_probes(self):
+        with self.start_cli("--startup-timeout", "0.45", "ALL ON") as process:
+            first = self.read_request(b"INFO")
+            self.assertNotEqual(first, self.read_request(b"INFO"))
+            _, err = process.communicate(timeout=3)
+            self.assertEqual(process.returncode, 1)
+            self.assertIn("Could not verify relay device", err)
+            self.assert_no_pending_request()
+
+    def test_does_not_retry_control_command_that_times_out(self):
+        with self.start_cli("ON 1", "STATUS") as process:
+            self.verify_device()
+            self.read_request(b"ON 1")
+            _, err = process.communicate(timeout=3)
+            self.assertEqual(process.returncode, 2)
+            self.assertIn("ON 1: Timed out", err)
             self.assert_no_pending_request()
 
     def test_invalid_later_command_prevents_any_serial_requests(self):
