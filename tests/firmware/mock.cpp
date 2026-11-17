@@ -117,6 +117,17 @@ void checkFraming() {
          tag + "ERR COMMAND TOO LONG\n");
   assertAllOff();
 
+  assert(feed("ALL O\rN\n") == "ERR INVALID CHARACTER\n");
+  assert(feed(tag + "ALL ON\r\r\n") == tag + "ERR INVALID CHARACTER\n");
+  assert(feed(tag.substr(0, 8) + "\r" + tag.substr(8) + "ALL ON\n") ==
+         "ERR INVALID CHARACTER\n");
+  assertAllOff();
+  assert(feed(tag + "ON " + std::string(59, ' ') + "1\r").empty());
+  assertAllOff();
+  assert(feed("\n") == tag + "OK ON 1\n");
+  assert(feed("OFF 1\r\n") == "OK OFF 1\n");
+  assertAllOff();
+
   assert(feed("ALL ON").empty());
   assert(feed("\x18" + tag + "ON 1\n") == tag + "OK ON 1\n");
   const unsigned relayModeChanges = pins.at(2).modeChanges;
