@@ -97,7 +97,7 @@ void printStatus() {
 }
 
 void printHelp() {
-  Serial.println("COMMANDS: ON <1-4> | OFF <1-4> | ALL ON | ALL OFF | STATUS | DIAG | TEST <pin> | HELP");
+  Serial.println("COMMANDS: ON <1-4> | OFF <1-4> | ALL ON | ALL OFF | STATUS | DIAG | TEST <pin> | INFO | HELP");
 }
 
 size_t relayIndexForPin(uint8_t pin) {
@@ -253,6 +253,10 @@ void handleChannelCommand(const char *arg, bool on) {
 }
 
 void handleCommand(const char *line, const char *header) {
+  if (std::strcmp(line, "INFO") == 0) {
+    Serial.println("INFO esp32-usb-relay4 PROTOCOL 1");
+    return;
+  }
   if (std::strcmp(line, "STATUS") == 0) {
     printStatus();
     return;
