@@ -34,6 +34,7 @@ bool relayStates[kRelayCount] = {false, false, false, false};
 char cmdBuf[kRequestHeaderLength + kCommandMaxLength + 1];
 size_t cmdLen = 0;
 FrameState frameState = FrameState::Normal;
+bool awaitingLineFeed = false;
 unsigned long lastCommandByteAt = 0;
 std::atomic<bool> usbResetPending{false};
 
@@ -42,12 +43,13 @@ void onUsbReset(void *, esp_event_base_t, int32_t, void *) {
 }
 
 bool hasPendingFrame() {
-  return cmdLen > 0 || frameState == FrameState::Tagged;
+  return cmdLen > 0 || frameState == FrameState::Tagged || awaitingLineFeed;
 }
 
 void discardFrame() {
   cmdLen = 0;
   frameState = FrameState::Discard;
+  awaitingLineFeed = false;
 }
 
 void discardPendingInput() {
@@ -373,10 +375,8 @@ void loop() {
     if (c == kCancelFrame) {
       cmdLen = 0;
       frameState = FrameState::Tagged;
+      awaitingLineFeed = false;
       lastCommandByteAt = millis();
-      continue;
-    }
-    if (c == '\r') {
       continue;
     }
     if (c == '\n') {
@@ -386,21 +386,28 @@ void loop() {
       }
       cmdLen = 0;
       frameState = FrameState::Normal;
+      awaitingLineFeed = false;
       continue;
     }
     if (frameState == FrameState::Discard) {
       continue;
     }
+    if (c == '\r' && !awaitingLineFeed) {
+      awaitingLineFeed = true;
+      lastCommandByteAt = millis();
+      continue;
+    }
+    const bool invalidCharacter = awaitingLineFeed || c == '\0';
     const size_t limit = kCommandMaxLength +
         (cmdLen > 0 && cmdBuf[0] == '@' ? kRequestHeaderLength : 0);
-    if (c != '\0' && cmdLen < limit) {
+    if (!invalidCharacter && cmdLen < limit) {
       cmdBuf[cmdLen++] = c;
       lastCommandByteAt = millis();
       continue;
     }
     // Reject the whole line, keeping the request ID if the header was valid.
     printReplyPrefix(hasRequestHeader(cmdBuf, cmdLen) ? cmdBuf : nullptr);
-    Serial.println(c == '\0' ? "ERR INVALID CHARACTER" : "ERR COMMAND TOO LONG");
+    Serial.println(invalidCharacter ? "ERR INVALID CHARACTER" : "ERR COMMAND TOO LONG");
     discardFrame();
   }
 }
