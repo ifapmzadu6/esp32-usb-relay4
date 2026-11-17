@@ -28,10 +28,12 @@ constexpr size_t kRequestHeaderLength = kRequestIdLength + 2;  // '@' and space
 constexpr char kCancelFrame = '\x18';  // ASCII CAN
 constexpr unsigned long kFrameIdleTimeoutMs = 2000;
 
+enum class FrameState { Normal, Tagged, Discard };
+
 bool relayStates[kRelayCount] = {false, false, false, false};
 char cmdBuf[kRequestHeaderLength + kCommandMaxLength + 1];
 size_t cmdLen = 0;
-bool discardingLine = false;
+FrameState frameState = FrameState::Normal;
 unsigned long lastCommandByteAt = 0;
 std::atomic<bool> usbResetPending{false};
 
@@ -39,11 +41,19 @@ void onUsbReset(void *, esp_event_base_t, int32_t, void *) {
   usbResetPending.store(true);
 }
 
+bool hasPendingFrame() {
+  return cmdLen > 0 || frameState == FrameState::Tagged;
+}
+
+void discardFrame() {
+  cmdLen = 0;
+  frameState = FrameState::Discard;
+}
+
 void discardPendingInput() {
   const int queued = Serial.available();
-  if (cmdLen > 0 || queued > 0) {
-    cmdLen = 0;
-    discardingLine = true;
+  if (hasPendingFrame() || queued > 0) {
+    discardFrame();
   }
   for (int i = 0; i < queued; ++i) {
     Serial.read();
@@ -304,10 +314,10 @@ void handleCommand(const char *line, const char *header) {
   Serial.println("ERR UNKNOWN COMMAND");
 }
 
-void handleFrame(char *frame, size_t length) {
+void handleFrame(char *frame, size_t length, bool requireTag) {
   const char *header = nullptr;
   char *command = frame;
-  if (frame[0] == '@') {
+  if (requireTag || frame[0] == '@') {
     if (!hasRequestHeader(frame, length)) {
       Serial.println("ERR INVALID REQUEST ID");
       return;
@@ -352,9 +362,8 @@ void loop() {
     if (!plugged) {
       return;
     }
-    if (cmdLen > 0 && millis() - lastCommandByteAt >= kFrameIdleTimeoutMs) {
-      cmdLen = 0;
-      discardingLine = true;
+    if (hasPendingFrame() && millis() - lastCommandByteAt >= kFrameIdleTimeoutMs) {
+      discardFrame();
     }
     const int byte = Serial.read();
     if (byte < 0) {
@@ -363,22 +372,23 @@ void loop() {
     const char c = static_cast<char>(byte);
     if (c == kCancelFrame) {
       cmdLen = 0;
-      discardingLine = false;
+      frameState = FrameState::Tagged;
+      lastCommandByteAt = millis();
       continue;
     }
     if (c == '\r') {
       continue;
     }
     if (c == '\n') {
-      if (!discardingLine) {
+      if (frameState != FrameState::Discard && cmdLen > 0) {
         cmdBuf[cmdLen] = '\0';
-        handleFrame(cmdBuf, cmdLen);
+        handleFrame(cmdBuf, cmdLen, frameState == FrameState::Tagged);
       }
       cmdLen = 0;
-      discardingLine = false;
+      frameState = FrameState::Normal;
       continue;
     }
-    if (discardingLine) {
+    if (frameState == FrameState::Discard) {
       continue;
     }
     const size_t limit = kCommandMaxLength +
@@ -389,8 +399,8 @@ void loop() {
       continue;
     }
     // Reject the whole line, keeping the request ID if the header was valid.
-    discardingLine = true;
     printReplyPrefix(hasRequestHeader(cmdBuf, cmdLen) ? cmdBuf : nullptr);
     Serial.println(c == '\0' ? "ERR INVALID CHARACTER" : "ERR COMMAND TOO LONG");
+    discardFrame();
   }
 }

@@ -75,6 +75,24 @@ void checkFraming() {
   const std::string tag = "@0123456789abcdef0123456789abcdef ";
   assertAllOff();
 
+  assert(feed("\x18" "ALL ON\n") == "ERR INVALID REQUEST ID\n");
+  assert(feed("\x18" "@0123456789abcdef0123456789abcde ALL ON\n") ==
+         "ERR INVALID REQUEST ID\n");
+  assert(feed("\x18\nSTATUS\n") == "STATUS 1:OFF 2:OFF 3:OFF 4:OFF\n");
+  assertAllOff();
+
+  assert(feed("\x18").empty());
+  clockMs += 2000;
+  assert(feed("ALL ON\n").empty());
+  assertAllOff();
+
+  assert(feed("\x18").empty());
+  Serial.plugged = false;
+  assert(feed("").empty());
+  Serial.plugged = true;
+  assert(feed("ALL ON\n").empty());
+  assertAllOff();
+
   assert(feed("ALL ON").empty());
   Serial.plugged = false;
   assert(feed("\nALL ON\n").empty());
