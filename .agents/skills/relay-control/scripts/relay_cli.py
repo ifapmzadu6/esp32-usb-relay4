@@ -16,6 +16,7 @@ import tty
 
 
 CANCEL_FRAME = "\x18"
+EXPECTED_DEVICE_INFO = "INFO esp32-usb-relay4 PROTOCOL 1"
 
 
 def find_default_port() -> str:
@@ -81,6 +82,8 @@ def write_command(fd: int, command: str, deadline: float) -> None:
 
 def expected_responses(command: str) -> tuple[str, ...]:
     command = command.upper()
+    if command == "INFO":
+        return ("INFO ",)
     if command == "DIAG":
         return ("LIVE ", "DIAG ")
     if command == "STATUS":
@@ -135,15 +138,26 @@ def read_response(
             return "\n".join(lines)
 
 
+def exchange(fd: int, buffer: bytearray, command: str, timeout: float) -> str:
+    header = f"@{secrets.token_hex(16)} "
+    deadline = time.monotonic() + timeout
+    write_command(fd, header + command, deadline)
+    return read_response(fd, buffer, deadline, header, command)
+
+
 def run_commands(fd: int, commands: list[str], timeout: float, wait: float) -> int:
     buffer = bytearray()
+    try:
+        device_info = exchange(fd, buffer, "INFO", timeout)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Could not verify relay device: {exc}") from exc
+    if device_info != EXPECTED_DEVICE_INFO:
+        raise ValueError(f"Incompatible relay device response: {device_info}")
+
     for idx, cmd in enumerate(commands):
         clean_cmd = cmd.strip()
-        header = f"@{secrets.token_hex(16)} "
-        deadline = time.monotonic() + timeout
         try:
-            write_command(fd, header + clean_cmd, deadline)
-            resp = read_response(fd, buffer, deadline, header, clean_cmd)
+            resp = exchange(fd, buffer, clean_cmd, timeout)
         except (OSError, ValueError) as exc:
             print(f"ERR: {clean_cmd}: {exc}", file=sys.stderr)
             return 2
@@ -203,6 +217,7 @@ def main() -> int:
     except (OSError, ValueError, termios.error) as exc:
         print(f"ERR: {exc}", file=sys.stderr)
         return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -109,7 +109,8 @@ sequenceDiagram
 | `ALL ON` | 全チャンネルを一括 ON | `OK ALL ON` |
 | `ALL OFF` | 全チャンネルを一括 OFF | `OK ALL OFF` |
 | `STATUS` | 各チャンネルの現在状態を取得 | `STATUS 1:<ON\|OFF> 2:<ON\|OFF> 3:<ON\|OFF> 4:<ON\|OFF>` |
-| `HELP` / `?` | 対応コマンド一覧を表示 | `COMMANDS: ON <1-4> \| OFF <1-4> \| ALL ON \| ALL OFF \| STATUS \| DIAG \| TEST <pin> \| HELP` |
+| `INFO` | 機種名とシリアルプロトコルのバージョンを取得 | `INFO esp32-usb-relay4 PROTOCOL 1` |
+| `HELP` / `?` | 対応コマンド一覧を表示 | `COMMANDS: ON <1-4> \| OFF <1-4> \| ALL ON \| ALL OFF \| STATUS \| DIAG \| TEST <pin> \| INFO \| HELP` |
 
 ### 診断・テストコマンド
 
@@ -142,4 +143,4 @@ python3 .agents/skills/relay-control/scripts/relay_cli.py "ON 1" "ON 2" STATUS
 
 シリアルポートの候補が複数ある場合は `--port` で接続先を指定します。CLI はポートを排他利用します。シリアルモニターなどがすでにポートを開いている場合は、先に閉じてください。
 
-CLI は各コマンドを ASCII CAN と新しい要求 ID で始めるため、両方に対応したファームウェアが必要です。デバイスが `ERR` を返した場合や、現在の要求 ID が付いた応答を受け取れなかった場合は、残りのコマンドの送信を中止します。タイムアウトしたコマンドが実行済みか確認するには、`STATUS` を送ってください。
+CLI は最初に要求 ID を付けて `INFO` を送信し、機種名とシリアルプロトコルのバージョンが一致した場合に指定されたコマンドを送ります。CLI とファームウェアは対応するバージョンを使ってください。デバイスが `ERR` を返した場合や、現在の要求 ID が付いた応答を受け取れなかった場合は、残りのコマンドの送信を中止します。タイムアウトしたコマンドが実行済みか確認するには、`STATUS` を送ってください。
