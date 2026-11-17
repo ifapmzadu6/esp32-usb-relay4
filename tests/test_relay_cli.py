@@ -49,13 +49,13 @@ class RelayCLITest(unittest.TestCase):
         self.assertFalse(select.select([self.master], [], [], 0)[0])
 
     def test_stops_batch_on_device_error(self):
-        with self.start_cli("TEST 2", "ALL ON") as process:
+        with self.start_cli("TEST 5", "ALL ON") as process:
             self.verify_device()
-            header = self.read_request(b"TEST 2")
-            self.send_reply(header, b"ERR RELAY PIN")
+            header = self.read_request(b"TEST 5")
+            self.send_reply(header, b"ERR INVALID CHARACTER")
             out, err = process.communicate(timeout=3)
             self.assertEqual(process.returncode, 2)
-            self.assertIn("ERR RELAY PIN", out)
+            self.assertIn("ERR INVALID CHARACTER", out)
             self.assertEqual(err, "")
             self.assert_no_pending_request()
 
@@ -101,3 +101,28 @@ class RelayCLITest(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertIn("Could not verify relay device", err)
             self.assert_no_pending_request()
+
+    def test_invalid_later_command_prevents_any_serial_requests(self):
+        for invalid in ("OFF 5", "ALL OF", "TEST 2", "TEST 11", "TEST +5",
+                        "ON " + " " * 60 + "1", "ON １", "STATUS\n"):
+            with self.subTest(command=invalid):
+                result = subprocess.run(
+                    [*self.cli, "ON 1", invalid], capture_output=True, text=True, timeout=3
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("command 2", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assert_no_pending_request()
+
+    def test_validation_allows_firmware_whitespace_and_numeric_pin_forms(self):
+        longest = "on " + "\t" * 59 + "1"
+        with self.start_cli(f" {longest} ", "test  005") as process:
+            self.verify_device()
+            self.send_reply(self.read_request(longest.encode()), b"OK ON 1")
+            self.send_reply(
+                self.read_request(b"test  005"),
+                b"TEST 5 PP_LOW=0 PP_HIGH=1 OD_LOW=0 OD_HIGH=1",
+            )
+            out, err = process.communicate(timeout=3)
+            self.assertEqual(process.returncode, 0, err)
+            self.assertIn("TEST 5 PP_LOW=", out)

@@ -17,6 +17,9 @@ import tty
 
 CANCEL_FRAME = "\x18"
 EXPECTED_DEVICE_INFO = "INFO esp32-usb-relay4 PROTOCOL 1"
+COMMAND_MAX_LENGTH = 63
+# The protocol 1 board mapping reserves GPIO 2, 3, 4 and 10 for relays.
+TEST_PINS = {0, 1, 5, 6, 7, 8, 9, 20, 21}
 
 
 def find_default_port() -> str:
@@ -93,11 +96,28 @@ def expected_responses(command: str) -> tuple[str, ...]:
     if command in ("ALL ON", "ALL OFF"):
         return (f"OK {command}",)
     verb, _, arg = command.partition(" ")
-    if verb in ("ON", "OFF") and arg.lstrip() in ("1", "2", "3", "4"):
-        return (f"OK {verb} {arg.lstrip()}",)
-    if verb == "TEST":
-        return ("TEST ",)
+    arg = arg.lstrip(" \t\v\f")
+    if verb in ("ON", "OFF") and arg in ("1", "2", "3", "4"):
+        return (f"OK {verb} {arg}",)
+    if verb == "TEST" and arg.isdecimal():
+        pin = int(arg)
+        if pin in TEST_PINS:
+            return (f"TEST {pin} ",)
     return ()
+
+
+def validate_commands(commands: list[str]) -> list[str]:
+    validated = []
+    for index, raw in enumerate(commands, start=1):
+        command = raw.strip()
+        if not command or any(c in raw for c in ("\r", "\n", "\0", CANCEL_FRAME)):
+            raise ValueError(f"command {index} must be a nonempty line without CR, LF, NUL, or CAN")
+        if not command.isascii() or len(command) > COMMAND_MAX_LENGTH:
+            raise ValueError(f"command {index} must fit in {COMMAND_MAX_LENGTH} ASCII bytes")
+        if not expected_responses(command):
+            raise ValueError(f"invalid command {index}: {command!r}")
+        validated.append(command)
+    return validated
 
 
 def read_response(
@@ -154,14 +174,13 @@ def run_commands(fd: int, commands: list[str], timeout: float, wait: float) -> i
     if device_info != EXPECTED_DEVICE_INFO:
         raise ValueError(f"Incompatible relay device response: {device_info}")
 
-    for idx, cmd in enumerate(commands):
-        clean_cmd = cmd.strip()
+    for idx, command in enumerate(commands):
         try:
-            resp = exchange(fd, buffer, clean_cmd, timeout)
+            resp = exchange(fd, buffer, command, timeout)
         except (OSError, ValueError) as exc:
-            print(f"ERR: {clean_cmd}: {exc}", file=sys.stderr)
+            print(f"ERR: {command}: {exc}", file=sys.stderr)
             return 2
-        print(f"> {clean_cmd}\n< {resp}")
+        print(f"> {command}\n< {resp}")
         if resp.startswith("ERR "):
             return 2
         if wait > 0 and idx + 1 < len(commands):
@@ -204,16 +223,15 @@ def main() -> int:
         parser.error("--timeout must be finite and greater than zero")
     if not math.isfinite(args.wait) or args.wait < 0:
         parser.error("--wait must be finite and nonnegative")
-    if any(
-        not cmd.strip() or any(c in cmd for c in ("\r", "\n", "\0", CANCEL_FRAME))
-        for cmd in args.commands
-    ):
-        parser.error("each command must be a nonempty line without CR, LF, NUL, or CAN")
+    try:
+        commands = validate_commands(args.commands)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     try:
         port = args.port or find_default_port()
         with exclusive_serial(port, args.baud) as fd:
-            return run_commands(fd, args.commands, args.timeout, args.wait)
+            return run_commands(fd, commands, args.timeout, args.wait)
     except (OSError, ValueError, termios.error) as exc:
         print(f"ERR: {exc}", file=sys.stderr)
         return 1
