@@ -21,12 +21,33 @@ constexpr uint8_t kUsablePins[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21};
 constexpr bool kRelayActiveLow = true;
 constexpr uint8_t kRelayPinMode = kRelayActiveLow ? OUTPUT_OPEN_DRAIN : OUTPUT;
 
-constexpr size_t kCmdBufSize = 64;
+constexpr size_t kCommandMaxLength = 63;
+constexpr size_t kRequestIdLength = 32;
+constexpr size_t kRequestHeaderLength = kRequestIdLength + 2;  // '@' and space
 
 bool relayStates[kRelayCount] = {false, false, false, false};
-char cmdBuf[kCmdBufSize];
+char cmdBuf[kRequestHeaderLength + kCommandMaxLength + 1];
 size_t cmdLen = 0;
 bool discardingLine = false;
+
+bool hasRequestHeader(const char *line, size_t length) {
+  if (length < kRequestHeaderLength || line[0] != '@' ||
+      line[kRequestHeaderLength - 1] != ' ') {
+    return false;
+  }
+  for (size_t i = 1; i <= kRequestIdLength; ++i) {
+    if (!std::isxdigit(static_cast<unsigned char>(line[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void printReplyPrefix(const char *header) {
+  if (header != nullptr) {
+    Serial.write(reinterpret_cast<const uint8_t *>(header), kRequestHeaderLength);
+  }
+}
 
 uint8_t logicLevel(bool on) {
   const bool high = kRelayActiveLow ? !on : on;
@@ -71,7 +92,7 @@ size_t relayIndexForPin(uint8_t pin) {
 // Wiring check: applies the weak internal pulldown to each pin that isn't
 // driving an active relay. A powered module input (L jumper) pulls it high.
 // GPIO8/9 usually read 1 because of on-board pullups.
-void printDiag() {
+void printDiag(const char *header) {
   // Actual pin levels while the relay outputs are still being driven.
   Serial.print("LIVE");
   for (size_t i = 0; i < kRelayCount; ++i) {
@@ -81,6 +102,7 @@ void printDiag() {
     Serial.print(digitalRead(kRelayPins[i]));
   }
   Serial.println();
+  printReplyPrefix(header);
   Serial.print("DIAG");
   for (const uint8_t pin : kUsablePins) {
     Serial.print(' ');
@@ -210,12 +232,7 @@ void handleChannelCommand(const char *arg, bool on) {
   Serial.println(idx + 1);
 }
 
-void handleCommand(char *line) {
-  normalizeCommand(line);
-  if (line[0] == '\0') {
-    return;
-  }
-
+void handleCommand(const char *line, const char *header) {
   if (std::strcmp(line, "STATUS") == 0) {
     printStatus();
     return;
@@ -244,7 +261,7 @@ void handleCommand(char *line) {
     return;
   }
   if (std::strcmp(line, "DIAG") == 0) {
-    printDiag();
+    printDiag(header);
     return;
   }
   if (std::strcmp(line, "HELP") == 0 || std::strcmp(line, "?") == 0) {
@@ -263,13 +280,31 @@ void handleCommand(char *line) {
   Serial.println("ERR UNKNOWN COMMAND");
 }
 
+void handleFrame(char *frame, size_t length) {
+  const char *header = nullptr;
+  char *command = frame;
+  if (frame[0] == '@') {
+    if (!hasRequestHeader(frame, length)) {
+      Serial.println("ERR INVALID REQUEST ID");
+      return;
+    }
+    header = frame;
+    command += kRequestHeaderLength;
+  }
+
+  normalizeCommand(command);
+  if (header != nullptr || command[0] != '\0') {
+    printReplyPrefix(header);
+    handleCommand(command, header);
+  }
+}
+
 }  // namespace
 
 void setup() {
   for (size_t i = 0; i < kRelayCount; ++i) {
-    // Latch the inactive level before enabling the output driver so relays
-    // stay OFF across a reset. digitalWrite() is ignored until the pin has been
-    // claimed with pinMode(), so claim it as a plain input first.
+    // Latch the inactive level before enabling the output driver. Claim the
+    // pin as a plain input first so Arduino accepts the digitalWrite().
     pinMode(kRelayPins[i], INPUT);
     digitalWrite(kRelayPins[i], logicLevel(false));
     pinMode(kRelayPins[i], kRelayPinMode);
@@ -292,7 +327,7 @@ void loop() {
     if (c == '\n') {
       if (!discardingLine) {
         cmdBuf[cmdLen] = '\0';
-        handleCommand(cmdBuf);
+        handleFrame(cmdBuf, cmdLen);
       }
       cmdLen = 0;
       discardingLine = false;
@@ -301,15 +336,15 @@ void loop() {
     if (discardingLine) {
       continue;
     }
-    if (c == '\0') {
-      // Reject the whole line instead of executing the prefix before the NUL.
-      discardingLine = true;
-      Serial.println("ERR INVALID CHARACTER");
-    } else if (cmdLen + 1 < kCmdBufSize) {
+    const size_t limit = kCommandMaxLength +
+        (cmdLen > 0 && cmdBuf[0] == '@' ? kRequestHeaderLength : 0);
+    if (c != '\0' && cmdLen < limit) {
       cmdBuf[cmdLen++] = c;
-    } else {
-      discardingLine = true;
-      Serial.println("ERR COMMAND TOO LONG");
+      continue;
     }
+    // Reject the whole line, keeping the request ID if the header was valid.
+    discardingLine = true;
+    printReplyPrefix(hasRequestHeader(cmdBuf, cmdLen) ? cmdBuf : nullptr);
+    Serial.println(c == '\0' ? "ERR INVALID CHARACTER" : "ERR COMMAND TOO LONG");
   }
 }
