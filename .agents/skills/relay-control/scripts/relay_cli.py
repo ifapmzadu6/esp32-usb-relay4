@@ -60,6 +60,8 @@ def configure_serial(fd: int, baud: int) -> None:
 
     tty.setraw(fd)
     attrs = termios.tcgetattr(fd)
+    attrs[0] &= ~(termios.IXON | termios.IXOFF | termios.IXANY)
+    attrs[2] &= ~(termios.CSTOPB | getattr(termios, "CRTSCTS", 0))
     attrs[4] = attrs[5] = baud_map[baud]
     attrs[2] |= termios.CLOCAL | termios.CREAD
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
@@ -73,8 +75,14 @@ def exclusive_serial(port: str, baud: int):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.ioctl(fd, termios.TIOCEXCL)
         try:
-            configure_serial(fd, baud)
-            yield fd
+            original = termios.tcgetattr(fd)
+            try:
+                configure_serial(fd, baud)
+                yield fd
+            finally:
+                # Keep the lock until the original settings have been restored.
+                with suppress(OSError, termios.error):
+                    termios.tcsetattr(fd, termios.TCSANOW, original)
         finally:
             # The port may already have disappeared due to a disconnect.
             with suppress(OSError):

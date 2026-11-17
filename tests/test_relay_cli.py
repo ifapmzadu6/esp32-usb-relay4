@@ -6,6 +6,7 @@ import pty
 import select
 import subprocess
 import sys
+import termios
 import unittest
 
 
@@ -20,10 +21,10 @@ DIAG = b"DIAG 0=0 1=0 2=- 3=0 4=0 5=0 6=0 7=0 8=1 9=1 10=0 20=0 21=0"
 
 class RelayCLITest(unittest.TestCase):
     def setUp(self):
-        self.master, slave = pty.openpty()
+        self.master, self.slave = pty.openpty()
         self.addCleanup(os.close, self.master)
-        self.addCleanup(os.close, slave)
-        self.cli = [sys.executable, str(CLI), "--port", os.ttyname(slave), "-t", "1"]
+        self.addCleanup(os.close, self.slave)
+        self.cli = [sys.executable, str(CLI), "--port", os.ttyname(self.slave), "-t", "1"]
 
     def start_cli(self, *commands):
         return subprocess.Popen(
@@ -80,6 +81,38 @@ class RelayCLITest(unittest.TestCase):
             self.send_reply(header, b"STATUS 1:OFF 2:OFF 3:OFF 4:OFF")
             third.communicate(timeout=3)
             self.assertEqual(third.returncode, 0)
+
+    def test_sets_serial_mode_and_restores_settings_on_success_or_timeout(self):
+        flow = termios.IXON | termios.IXOFF | termios.IXANY
+        extra_control = termios.CSTOPB | getattr(termios, "CRTSCTS", 0)
+        original = termios.tcgetattr(self.slave)
+        original[0] |= flow
+        original[2] |= extra_control
+        original[3] |= termios.ECHO | termios.ICANON
+        original[4] = original[5] = termios.B9600
+        termios.tcsetattr(self.slave, termios.TCSANOW, original)
+        original = termios.tcgetattr(self.slave)
+        # BSD can set PENDIN when switching back to canonical input.
+        pending_input = getattr(termios, "PENDIN", 0)
+        original[3] &= ~pending_input
+
+        for should_reply in (True, False):
+            with self.subTest(should_reply=should_reply), self.start_cli("STATUS") as process:
+                self.verify_device()
+                header = self.read_request(b"STATUS")
+                active = termios.tcgetattr(self.slave)
+                self.assertEqual(active[0] & flow, 0)
+                self.assertEqual(active[2] & extra_control, 0)
+                self.assertEqual(active[2] & termios.CSIZE, termios.CS8)
+                self.assertEqual(active[3] & (termios.ECHO | termios.ICANON), 0)
+                self.assertEqual(active[4:6], [termios.B115200, termios.B115200])
+                if should_reply:
+                    self.send_reply(header, b"STATUS 1:OFF 2:OFF 3:OFF 4:OFF")
+                _, err = process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 0 if should_reply else 2, err)
+                restored = termios.tcgetattr(self.slave)
+                restored[3] &= ~pending_input
+                self.assertEqual(restored, original)
 
     def test_rejects_wrong_device_or_protocol_before_sending_commands(self):
         for reply in (b"INFO other-device PROTOCOL 1", b"INFO esp32-usb-relay4 PROTOCOL 2",
